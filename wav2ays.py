@@ -24,9 +24,18 @@ Pipeline
    (cpu_clock / cycles_per_iteration), so it must be hit precisely or the pitch
    drifts. resample_poly applies a polyphase anti-alias FIR; without it every
    component above Nyquist folds back as audible aliasing.
-6. Normalize to the requested AY DAC volume level (0..15). The level selects
-   the highest AY register value the converter may emit; optional headroom can
-   attenuate below that level.
+6. Map and normalize onto the unipolar DAC span [0, full], where `full` is the
+   requested AY volume level (0..15, less optional headroom). The level selects
+   the highest AY register value the converter may emit. Two mappings (--map):
+   - bipolar (default): scale the static min..max range to [0, full], so silence
+     sits at mid-DAC. Best on sustained/looping material, but quiet tails ride a
+     loud pedestal that never decays.
+   - antidc: first lift the waveform's time-varying lower envelope to ~0 (see
+     antidc_bend), so the trough rides at code 0 and quiet tails decay to true
+     silence while the full waveform shape is preserved. Best for decaying
+     one-shots and material with quiet gaps; adds some sub-bass.
+   --norm-percentile maps a high percentile of the swing to full scale instead of
+   the absolute peak, parking the loud body in the dense mid-codes.
 7. Quantize to the AY's 16 volume levels. The AY DAC is logarithmic: steps are
    roughly equal in dB, so levels are dense near zero and sparse near the top.
    Quantization is therefore nearest-neighbour against a measured amplitude
