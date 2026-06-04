@@ -68,6 +68,7 @@ rate, so the AY-degraded result can be auditioned on a PC.
 import argparse
 import struct
 import sys
+from collections import deque
 from math import gcd
 from pathlib import Path
 
@@ -181,15 +182,45 @@ def steep_lpf(sig, src_rate, cutoff_hz, order):
     return sosfiltfilt(sos, sig)
 
 
-def lower_envelope(sig, rate, attack_hz, release_hz, smooth_hz):
+def forward_max(x, window):
+    """Running maximum over each sample and the next `window` samples.
+
+    x[i] is replaced by max(x[i..i+window]). Used so the envelope follower can
+    "see" an incoming trough before it arrives. O(n) via a monotonic deque.
+    """
+    if window <= 0:
+        return x
+    n = len(x)
+    out = np.empty_like(x)
+    dq = deque()  # indices, x values strictly decreasing
+    j = 0  # next index not yet pushed
+    for i in range(n):
+        hi = min(i + window, n - 1)
+        while j <= hi:
+            while dq and x[dq[-1]] <= x[j]:
+                dq.pop()
+            dq.append(j)
+            j += 1
+        while dq[0] < i:
+            dq.popleft()
+        out[i] = x[dq[0]]
+    return out
+
+
+def lower_envelope(sig, rate, attack_hz, release_hz, smooth_hz, lookahead=0):
     """Track how far the waveform dips below zero, over time (the trough depth).
 
     An asymmetric one-pole follower on -sig: fast attack catches each trough,
     slow release lets it ride a decaying tail rather than snapping back up
     between cycles. A final low-pass smooths zipper noise. Returns a
     non-negative envelope (0 where the signal never goes below zero).
+
+    With lookahead > 0 the follower runs on a forward-maximum of -sig (each
+    sample raised to the deepest trough within the next `lookahead` samples), so
+    the envelope starts lifting *before* a trough lands instead of lagging into
+    its front edge.
     """
-    neg = -sig
+    neg = forward_max(-sig, int(lookahead))
     atk = float(np.exp(-2.0 * np.pi * attack_hz / rate))
     rel = float(np.exp(-2.0 * np.pi * release_hz / rate))
     env = np.empty_like(neg)
@@ -207,7 +238,7 @@ def lower_envelope(sig, rate, attack_hz, release_hz, smooth_hz):
     return env
 
 
-def antidc_bend(sig, rate, attack_hz, release_hz, smooth_hz):
+def antidc_bend(sig, rate, attack_hz, release_hz, smooth_hz, lookahead=0):
     """Lift the waveform's lower envelope to ~0 so its bottom rides at zero.
 
     Unlike static normalization (which fixes silence at mid-DAC and leaves a
@@ -216,8 +247,11 @@ def antidc_bend(sig, rate, attack_hz, release_hz, smooth_hz):
     so quiet tails decay toward code 0 (true silence) while the full bipolar
     waveform shape is preserved (no half-wave clamp / overdrive). The cost is
     some added sub-bass, since the envelope itself is a slow component.
+
+    lookahead (in samples) lets the envelope rise ahead of incoming troughs;
+    see lower_envelope.
     """
-    env = lower_envelope(sig, rate, attack_hz, release_hz, smooth_hz)
+    env = lower_envelope(sig, rate, attack_hz, release_hz, smooth_hz, lookahead)
     return sig + env
 
 
@@ -436,6 +470,11 @@ def main():
     ap.add_argument("--antidc-smooth-hz", type=float, default=60.0,
                     help="anti-DC envelope post-smoothing low-pass cutoff (Hz); "
                          "0 disables")
+    ap.add_argument("--antidc-lookahead", type=int, default=0,
+                    metavar="SAMPLES",
+                    help="anti-DC envelope look-ahead (samples); lets the lift "
+                         "rise before an incoming trough lands instead of "
+                         "lagging into its front edge. 0 disables")
     ap.add_argument("--dither", action=argparse.BooleanOptionalAction,
                     default=True)
     ap.add_argument("--noise-shaping", action=argparse.BooleanOptionalAction,
@@ -497,7 +536,8 @@ def main():
         # Lift the lower envelope to ~0 so the trough rides at code 0; quiet
         # tails decay to silence instead of parking on a loud mid-DAC pedestal.
         bent = antidc_bend(sig, args.rate, args.antidc_attack_hz,
-                           args.antidc_release_hz, args.antidc_smooth_hz)
+                           args.antidc_release_hz, args.antidc_smooth_hz,
+                           max(args.antidc_lookahead, 0))
         # The bent signal already rides from ~0 upward, so scale its positive
         # peak (a high percentile, ignoring edge transients) to full scale.
         edge = int(round(args.rate * max(args.norm_edge_ms, 0.0) / 1000.0))
