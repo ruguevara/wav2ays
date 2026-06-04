@@ -381,20 +381,25 @@ def quantize(dac, dither, shaping, rng, max_level, codebook, adjacent_only,
     return out
 
 
-def pack(idx, nibble):
+def pack(idx, nibble, nibble_order="low-first"):
     if not nibble:
         return idx.tobytes()
-    # Low nibble holds the earlier sample; pad an odd tail with a zero sample.
+    # Two codes per byte; pad an odd tail with a zero sample. nibble_order picks
+    # which nibble holds the EARLIER (even-index) sample: "low-first" → low
+    # nibble; "high-first" → high nibble (the player's read order).
     if len(idx) % 2:
         idx = np.append(idx, np.uint8(0))
-    return (idx[0::2] | (idx[1::2] << 4)).astype(np.uint8).tobytes()
+    early, late = idx[0::2], idx[1::2]
+    if nibble_order == "high-first":
+        early, late = late, early
+    return (early | (late << 4)).astype(np.uint8).tobytes()
 
 
-def write_ays(path, idx, rate, nibble):
+def write_ays(path, idx, rate, nibble, nibble_order="low-first"):
     flags = 1 if nibble else 0
     header = struct.pack("<4sBBBBHIH", b"AYS1", 1, 1, flags, 0,
                           rate, len(idx), 0)
-    Path(path).write_bytes(header + pack(idx, nibble))
+    Path(path).write_bytes(header + pack(idx, nibble, nibble_order))
 
 
 def decode_to_float(idx, codebook):
@@ -490,6 +495,12 @@ def main():
                     help="limit dithered output to the nearest codebook value "
                          "or one adjacent code")
     ap.add_argument("--pack", choices=["byte", "nibble"], default="byte")
+    ap.add_argument("--nibble-order", choices=["low-first", "high-first"],
+                    default="low-first",
+                    help="which nibble of a packed byte holds the EARLIER "
+                         "sample (nibble pack only). low-first (default): earlier "
+                         "sample in the low nibble. high-first: earlier sample in "
+                         "the high nibble — match the player's read order.")
     ap.add_argument("--preview-wav", nargs="?", const="", default=None,
                     metavar="PATH",
                     help="also write a 32-bit float WAV of the AY-quantized "
@@ -566,7 +577,7 @@ def main():
                    args.adjacent_dither, shaper)
 
     out = args.output or str(Path(args.input).with_suffix(".ays"))
-    write_ays(out, idx, args.rate, args.pack == "nibble")
+    write_ays(out, idx, args.rate, args.pack == "nibble", args.nibble_order)
 
     dur = len(idx) / args.rate
     print(f"{out}: {len(idx)} samples, {args.rate} Hz, {dur:.2f} s, "
