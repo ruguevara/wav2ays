@@ -130,6 +130,10 @@ def load_mono(path):
 
 
 def dc_block(sig, rate, cutoff):
+    # cutoff <= 0 disables DC removal (e.g. single-cycle wavetables, already
+    # ~0-centred — the HPF only adds step-edge overshoot there).
+    if cutoff <= 0:
+        return sig
     sos_b, sos_a = butter(2, cutoff / (rate / 2.0), btype="highpass")
     return filtfilt(sos_b, sos_a, sig)
 
