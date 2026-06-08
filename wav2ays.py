@@ -515,6 +515,14 @@ def main():
                          "reference via aysnr.py; PATH optional, defaults to "
                          "<output>.emphasis.wav")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--loop-cycle", type=int, default=0, metavar="N",
+                    help="treat the input as a single N-sample looping cycle "
+                         "(e.g. 256 for a wavetable): tile it to many periods so "
+                         "the filtfilt stages get true periodic context and no "
+                         "edge transients, then crop exactly N codes from the "
+                         "steady-state middle (cycle-aligned) so the result loops "
+                         "seamlessly. Use with -r == source rate (identity "
+                         "resample) so the crop stays N samples.")
     args = ap.parse_args()
 
     if not 1 <= args.rate <= 65535:
@@ -530,6 +538,25 @@ def main():
         sig, src_rate = load_mono(args.input)
     except Exception as e:
         sys.exit(f"cannot read {args.input}: {e}")
+
+    # Single-cycle (wavetable) mode: tile to many periods BEFORE filtering so the
+    # zero-phase filtfilt stages see the true periodic signal (each sample's real
+    # neighbour is the next cycle), avoiding short-buffer edge transients and a
+    # non-seamless loop seam. We crop one steady-state cycle back out after
+    # quantization. Requires src_rate == args.rate (identity resample) so the
+    # crop length stays exactly N codes.
+    loop_n = args.loop_cycle
+    if loop_n > 0:
+        if len(sig) % loop_n:
+            sys.exit(f"--loop-cycle {loop_n}: input length {len(sig)} is not a "
+                     f"multiple of {loop_n}")
+        if src_rate != args.rate:
+            sys.exit(f"--loop-cycle requires -r equal to the source rate "
+                     f"({src_rate}); got {args.rate} (resample would break the "
+                     f"cycle-aligned crop)")
+        loop_reps = max(256, 1)            # plenty past the ~0.15 s filter settle
+        sig = np.tile(sig, loop_reps)
+
     sig = dc_block(sig, src_rate, args.hpf_hz)
     sig = pre_emphasis(sig, src_rate, args.pre_emphasis_db, args.pre_emphasis_hz)
     if args.lpf_margin > 0:
@@ -575,6 +602,17 @@ def main():
     rng = np.random.default_rng(args.seed)
     idx = quantize(dac, args.dither, args.noise_shaping, rng, level, codebook,
                    args.adjacent_dither, shaper)
+
+    if loop_n > 0:
+        # Crop one cycle from the steady-state middle, cycle-aligned, so it loops
+        # seamlessly (start/end codes settle after many periods of the quantizer).
+        total_cycles = len(idx) // loop_n
+        mid = (total_cycles // 2) * loop_n
+        idx = idx[mid:mid + loop_n]
+        seam = int(idx[0]) - int(idx[-1])
+        if abs(seam) > 1:
+            print(f"note: loop seam code[0]-code[-1] = {seam} (>1); a click may be "
+                  f"audible — try --no-dither for nearest-neighbour", file=sys.stderr)
 
     out = args.output or str(Path(args.input).with_suffix(".ays"))
     write_ays(out, idx, args.rate, args.pack == "nibble", args.nibble_order)
